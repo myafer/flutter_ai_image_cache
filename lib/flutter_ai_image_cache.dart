@@ -1,4 +1,5 @@
 import 'dart:async';
+import "package:flutter/services.dart";
 import "package:crypto/crypto.dart";
 import 'dart:convert';
 import 'dart:io';
@@ -480,4 +481,186 @@ class _SmartCachedImageState extends State<SmartCachedImage> {
       child: Icon(Icons.broken_image, color: Colors.grey),
     ),
   );
+}
+// ============================================================
+// 原生缓存兼容 - SmartCacheManager
+// 自动识别 SDWebImage/Glide/Kingfisher/Nuke
+// ============================================================
+class SmartCacheManager {
+  static const String _configFile = 'native_cache_config.json';
+  NativeCacheConfig? _config;
+
+  Future<NativeCacheConfig> getConfig() async {
+    if (_config != null) return _config!;
+    _config = await _loadConfig();
+    if (_config != null) return _config!;
+    _config = await _detectNativeLibs();
+    await _saveConfig(_config!);
+    return _config!;
+  }
+
+  Future<NativeCacheConfig> _detectNativeLibs() async {
+    final config = NativeCacheConfig();
+    // 扫描常见缓存路径
+    final basePaths = [
+      '/data/data',
+      '/Users/Library/Caches',
+    ];
+    for (final basePath in basePaths) {
+      final dir = Directory(basePath);
+      if (await dir.exists()) {
+        await for (final entity in dir.list()) {
+          if (entity is Directory) {
+            final name = entity.path.split('/').last;
+            if (name.contains('image_manager_disk_cache') || 
+                name.contains('kingfisher') ||
+                name.contains('sdweb') ||
+                name.contains('nuke')) {
+              config.sources.add(CacheSourceInfo(
+                path: entity.path,
+                source: _detectSource(name),
+                fileNameAlgo: _getAlgo(_detectSource(name)),
+                priority: config.sources.length + 1,
+              ));
+            }
+          }
+        }
+      }
+    }
+    return config;
+  }
+
+  CacheSource _detectSource(String name) {
+    if (name.contains('sdweb')) return CacheSource.sdWebImage;
+    if (name.contains('kingfisher')) return CacheSource.kingfisher;
+    if (name.contains('nuke')) return CacheSource.nuke;
+    return CacheSource.glide;
+  }
+
+  FileNameAlgo _getAlgo(CacheSource source) {
+    switch (source) {
+      case CacheSource.kingfisher: return FileNameAlgo.sha256;
+      case CacheSource.nuke: return FileNameAlgo.xxhash;
+      default: return FileNameAlgo.md5;
+    }
+  }
+
+  String _hashKey(String url, FileNameAlgo algo) {
+    switch (algo) {
+      case FileNameAlgo.sha256:
+        return sha256.convert(utf8.encode(url)).toString();
+      case FileNameAlgo.xxhash:
+        return (url.hashCode & 0xFFFFFFFF).toRadixString(16);
+      default:
+        return md5.convert(utf8.encode(url)).toString();
+    }
+  }
+
+  Future<Uint8List?> getImageSmart(String url) async {
+    final config = await getConfig();
+    final sortedSources = config.sources..sort((a, b) => a.priority.compareTo(b.priority));
+    
+    for (final source in sortedSources) {
+      final hash = _hashKey(url, source.fileNameAlgo);
+      final exts = ['', '.jpg', '.png', '.webp', '.gif'];
+      
+      for (final ext in exts) {
+        final path = _buildPath(source.source, hash, source.path, ext);
+        final file = File(path);
+        if (await file.exists()) {
+          return await file.readAsBytes();
+        }
+      }
+    }
+    return null;
+  }
+
+  String _buildPath(CacheSource source, String hash, String base, String ext) {
+    switch (source) {
+      case CacheSource.sdWebImage:
+        return '$base/${hash.substring(0,2)}/${hash.substring(2,4)}/$hash$ext';
+      case CacheSource.glide:
+        return '$base/${hash.codeUnitAt(0)%10}/${hash.codeUnitAt(1)%10}/$hash$ext';
+      case CacheSource.kingfisher:
+        return '$base/cache/key/$hash$ext';
+      case CacheSource.nuke:
+        return '$base/$hash$ext';
+    }
+  }
+
+  Future<void> _saveConfig(NativeCacheConfig config) async {}
+  Future<NativeCacheConfig?> _loadConfig() async => null;
+}
+
+class NativeCacheConfig {
+  final List<CacheSourceInfo> sources = [];
+}
+
+class CacheSourceInfo {
+  final String path;
+  final CacheSource source;
+  final FileNameAlgo fileNameAlgo;
+  final int priority;
+  CacheSourceInfo({
+    required this.path,
+    required this.source,
+    required this.fileNameAlgo,
+    required this.priority,
+  });
+}
+
+enum CacheSource { sdWebImage, glide, kingfisher, nuke }
+enum FileNameAlgo { md5, sha256, xxhash }
+
+// ============================================================
+// 零拷贝纹理共享 - TextureShare
+// ============================================================
+class TextureShare {
+  static final _channel = MethodChannel('flutter_ai_image_cache/texture');
+  
+  /// 从原生获取纹理
+  static Future<TextureData?> fromNative(String url) async {
+    try {
+      final result = await _channel.invokeMethod<Map>('shareTexture', {'url': url});
+      if (result == null) return null;
+      return TextureData(
+        textureId: result['textureId'] as int,
+        width: result['width'] as int,
+        height: result['height'] as int,
+        url: url,
+      );
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  /// 释放纹理
+  static Future<void> release(String url) async {
+    try {
+      await _channel.invokeMethod('releaseTexture', {'url': url});
+    } catch (e) {}
+  }
+}
+
+/// Texture Widget
+class TextureImage extends StatelessWidget {
+  final TextureData data;
+  final double? width;
+  final double? height;
+  
+  const TextureImage({
+    super.key,
+    required this.data,
+    this.width,
+    this.height,
+  });
+  
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: width ?? data.width.toDouble(),
+      height: height ?? data.height.toDouble(),
+      child: Texture(textureId: data.textureId),
+    );
+  }
 }
