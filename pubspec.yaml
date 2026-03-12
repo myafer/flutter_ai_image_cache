@@ -1,0 +1,22 @@
+name: flutter_ai_image_cache
+description: 高性能Flutter图片缓存库，支持原生缓存兼容和零拷贝纹理
+version: 1.0.0
+homepage: https://github.com/myafer/flutter_ai_image_cache
+repository: https://github.com/myafer/flutter_ai_image_cache
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  crypto: ^3.0.3
+  path_provider: ^2.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
